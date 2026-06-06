@@ -1,9 +1,9 @@
 """
 Bərəkətli Telegram Bot — Main File
 ====================================
- 
+
 Run with: python bot.py
- 
+
 What this bot does (the flow):
 1. Customer sends /start → welcome message
 2. Shows menu as buttons
@@ -16,14 +16,14 @@ What this bot does (the flow):
 9. Asks for delivery location (Google Maps pin)
 10. Saves to Google Sheet + notifies admin + sends customer confirmation
 """
- 
+
 import logging
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
- 
+
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -41,7 +41,7 @@ from telegram.ext import (
     ContextTypes,
     filters,
 )
- 
+
 from menu import (
     PRODUCTS,
     FARMERS,
@@ -52,27 +52,27 @@ from menu import (
     get_active_products,
     format_price,
 )
- 
+
 # ============================================================
 # SETUP
 # ============================================================
- 
+
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_CHAT_ID = os.getenv("ADMIN_CHAT_ID")
- 
+
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger(__name__)
- 
+
 # ============================================================
 # CONVERSATION STATES
 # ============================================================
 # Each state is a "step" in the conversation.
 # The bot remembers which step each user is on.
- 
+
 (
     BROWSING_MENU,       # showing main menu, waiting for product choice
     CHOOSING_QUANTITY,   # showed product, waiting for quantity
@@ -80,19 +80,19 @@ logger = logging.getLogger(__name__)
     AWAITING_CONTACT,    # waiting for customer to share contact
     AWAITING_LOCATION,   # waiting for Google Maps location
 ) = range(5)
- 
- 
+
+
 # ============================================================
 # HELPER FUNCTIONS
 # ============================================================
- 
+
 def get_or_create_cart(context: ContextTypes.DEFAULT_TYPE) -> dict:
     """Get the user's cart from their personal session storage, or create empty one."""
     if "cart" not in context.user_data:
         context.user_data["cart"] = {}  # {product_id: quantity}
     return context.user_data["cart"]
- 
- 
+
+
 def calculate_cart_total(cart: dict) -> float:
     """Sum up all items in cart × their prices."""
     total = 0.0
@@ -100,13 +100,13 @@ def calculate_cart_total(cart: dict) -> float:
         if product_id in PRODUCTS:
             total += PRODUCTS[product_id]["price"] * quantity
     return total
- 
- 
+
+
 def format_cart_summary(cart: dict) -> str:
     """Return a nicely formatted string showing all items in cart."""
     if not cart:
         return "Səbətiniz boşdur."
- 
+
     lines = []
     for product_id, quantity in cart.items():
         product = PRODUCTS[product_id]
@@ -121,8 +121,8 @@ def format_cart_summary(cart: dict) -> str:
     total = calculate_cart_total(cart)
     lines.append(f"\n💰 Cəmi: {format_price(total)}")
     return "\n".join(lines)
- 
- 
+
+
 def build_menu_keyboard(cart: dict) -> InlineKeyboardMarkup:
     """Build the main menu as inline buttons (2 products per row)."""
     products = get_active_products()
@@ -138,7 +138,7 @@ def build_menu_keyboard(cart: dict) -> InlineKeyboardMarkup:
             row = []
     if row:
         buttons.append(row)
- 
+
     # Bottom action buttons
     cart_total = calculate_cart_total(cart)
     if cart:
@@ -152,8 +152,8 @@ def build_menu_keyboard(cart: dict) -> InlineKeyboardMarkup:
             InlineKeyboardButton("✅ Sifarişi tamamla", callback_data="action:checkout")
         ])
     return InlineKeyboardMarkup(buttons)
- 
- 
+
+
 def build_quantity_keyboard(product_id: str) -> InlineKeyboardMarkup:
     """Build quantity selection buttons for a product."""
     product = PRODUCTS[product_id]
@@ -174,8 +174,8 @@ def build_quantity_keyboard(product_id: str) -> InlineKeyboardMarkup:
         InlineKeyboardButton("⬅️ Geri", callback_data="action:back_to_menu")
     ])
     return InlineKeyboardMarkup(buttons)
- 
- 
+
+
 def build_cart_review_keyboard() -> InlineKeyboardMarkup:
     """Buttons shown when reviewing the cart before checkout."""
     return InlineKeyboardMarkup([
@@ -183,20 +183,20 @@ def build_cart_review_keyboard() -> InlineKeyboardMarkup:
         [InlineKeyboardButton("✏️ Düzəliş et", callback_data="action:back_to_menu")],
         [InlineKeyboardButton("❌ Sifarişi ləğv et", callback_data="action:cancel_order")],
     ])
- 
- 
+
+
 # ============================================================
 # HANDLERS — these run when customer takes specific actions
 # ============================================================
- 
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Triggered when customer sends /start or just says hi."""
     user = update.effective_user
     logger.info(f"New session: {user.id} ({user.first_name})")
- 
+
     # Reset cart for fresh session
     context.user_data["cart"] = {}
- 
+
     welcome = (
         f"Salam, {user.first_name}! 🌿\n\n"
         f"*Bərəkətli*-yə xoş gəlmisiniz — Lənkərandan kənd məhsulları, "
@@ -206,7 +206,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"💰 Minimum sifariş: {format_price(MINIMUM_ORDER_AZN)}\n\n"
         f"Aşağıdakı menyudan məhsul seçin 👇"
     )
- 
+
     cart = get_or_create_cart(context)
     await update.message.reply_text(
         welcome,
@@ -214,20 +214,20 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=build_menu_keyboard(cart),
     )
     return BROWSING_MENU
- 
- 
+
+
 async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer tapped a product button → show farmer + ask quantity."""
     query = update.callback_query
     await query.answer()
- 
+
     product_id = query.data.split(":")[1]
     product = PRODUCTS[product_id]
     farmer = FARMERS[product["farmer_id"]]
- 
+
     # Store which product we're configuring (in case customer goes back)
     context.user_data["current_product"] = product_id
- 
+
     caption = (
         f"{product['emoji']} *{product['name_az']}* — "
         f"{format_price(product['price'])}/{product['unit_label_az']}\n\n"
@@ -235,16 +235,16 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         f"📍 {farmer['village']}\n\n"
         f"_{farmer['story']}_"
     )
- 
+
     # Build the photo carousel: main photo first (with caption), then farm photos
     from telegram import InputMediaPhoto
- 
+
     photo_ids = []
     if farmer["main_photo_id"]:
         photo_ids.append(farmer["main_photo_id"])
     photo_ids.extend(farmer["farm_photo_ids"])
     photo_ids = photo_ids[:10]  # Telegram allows max 10 in a media group
- 
+
     if len(photo_ids) >= 2:
         # Send swipeable carousel — caption on the FIRST photo only
         media = [
@@ -276,28 +276,28 @@ async def show_product(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
             parse_mode="Markdown",
             reply_markup=build_quantity_keyboard(product_id),
         )
- 
+
     return CHOOSING_QUANTITY
- 
- 
+
+
 async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer picked a quantity → add to cart → return to menu."""
     query = update.callback_query
     await query.answer()
- 
+
     # callback_data format: "qty:product_id:quantity"
     parts = query.data.split(":")
     product_id = parts[1]
     quantity = float(parts[2])
- 
+
     cart = get_or_create_cart(context)
     # If product already in cart, replace (could also add — but replace is clearer)
     cart[product_id] = quantity
- 
+
     product = PRODUCTS[product_id]
     line_total = product["price"] * quantity
     cart_total = calculate_cart_total(cart)
- 
+
     confirmation = (
         f"✅ Səbətə əlavə edildi:\n"
         f"{product['emoji']} {product['name_az']}: "
@@ -305,62 +305,62 @@ async def add_to_cart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int
         f"🛒 Səbət cəmi: {format_price(cart_total)}\n\n"
         f"Daha nə istəyirsiniz?"
     )
- 
+
     await query.message.reply_text(
         confirmation,
         reply_markup=build_menu_keyboard(cart),
     )
     return BROWSING_MENU
- 
- 
+
+
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Show menu again (from Back button or after Edit)."""
     query = update.callback_query
     await query.answer()
- 
+
     cart = get_or_create_cart(context)
     text = "📋 Menyu:"
     if cart:
         text = f"📋 Menyu:\n\n🛒 Səbətdə: {format_price(calculate_cart_total(cart))}"
- 
+
     await query.message.reply_text(
         text,
         reply_markup=build_menu_keyboard(cart),
     )
     return BROWSING_MENU
- 
- 
+
+
 async def view_cart(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer tapped 🛒 Səbət — show cart contents."""
     query = update.callback_query
     await query.answer()
- 
+
     cart = get_or_create_cart(context)
     summary = format_cart_summary(cart)
- 
+
     await query.message.reply_text(
         f"🛒 *Səbətiniz:*\n\n{summary}",
         parse_mode="Markdown",
         reply_markup=build_menu_keyboard(cart),
     )
     return BROWSING_MENU
- 
- 
+
+
 async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer tapped 'Sifarişi tamamla' — show summary, ask to confirm."""
     query = update.callback_query
     await query.answer()
- 
+
     cart = get_or_create_cart(context)
     total = calculate_cart_total(cart)
- 
+
     if not cart:
         await query.message.reply_text(
             "Səbətiniz boşdur. Əvvəlcə məhsul seçin 🙂",
             reply_markup=build_menu_keyboard(cart),
         )
         return BROWSING_MENU
- 
+
     if total < MINIMUM_ORDER_AZN:
         needed = MINIMUM_ORDER_AZN - total
         await query.message.reply_text(
@@ -370,7 +370,7 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             reply_markup=build_menu_keyboard(cart),
         )
         return BROWSING_MENU
- 
+
     summary = format_cart_summary(cart)
     await query.message.reply_text(
         f"📝 *Sifarişinizin xülasəsi:*\n\n{summary}\n\n"
@@ -379,25 +379,25 @@ async def checkout(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         reply_markup=build_cart_review_keyboard(),
     )
     return REVIEWING_CART
- 
- 
+
+
 async def cancel_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer tapped 'Ləğv et' — clear cart, end conversation."""
     query = update.callback_query
     await query.answer()
- 
+
     context.user_data["cart"] = {}
     await query.message.reply_text(
         "Sifarişiniz ləğv edildi. Yenidən başlamaq üçün /start yazın 👋"
     )
     return ConversationHandler.END
- 
- 
+
+
 async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer confirmed cart — now collect contact info."""
     query = update.callback_query
     await query.answer()
- 
+
     # Calculate next Saturday for delivery date
     today = datetime.now()
     days_until_saturday = (5 - today.weekday()) % 7
@@ -405,7 +405,7 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         days_until_saturday = 7
     delivery_date = today + timedelta(days=days_until_saturday)
     context.user_data["delivery_date"] = delivery_date.strftime("%d.%m.%Y")
- 
+
     await query.message.reply_text(
         f"🎉 Çox sayğı! Sifarişinizi qeyd edirəm.\n\n"
         f"🚚 Çatdırılma: *{DELIVERY_DAY_AZ}, "
@@ -420,8 +420,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         ),
     )
     return AWAITING_CONTACT
- 
- 
+
+
 async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer shared contact — save it, ask for location."""
     contact = update.message.contact
@@ -429,7 +429,7 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "name": f"{contact.first_name or ''} {contact.last_name or ''}".strip(),
         "phone": contact.phone_number,
     }
- 
+
     await update.message.reply_text(
         f"Təşəkkürlər, {context.user_data['contact']['name']}! ✅\n\n"
         f"Son bir addım: çatdırılma ünvanınızı *Google Maps lokasiyası* "
@@ -443,8 +443,8 @@ async def receive_contact(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         ),
     )
     return AWAITING_LOCATION
- 
- 
+
+
 async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Customer shared location — finalize order, save everywhere, notify admin."""
     location = update.message.location
@@ -453,14 +453,14 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "lng": location.longitude,
         "maps_link": f"https://maps.google.com/?q={location.latitude},{location.longitude}",
     }
- 
+
     # Build the complete order record
     cart = get_or_create_cart(context)
     contact = context.user_data["contact"]
     loc = context.user_data["location"]
     order_id = f"BRK-{datetime.now().strftime('%Y%m%d-%H%M%S')}-{update.effective_user.id}"
     total = calculate_cart_total(cart)
- 
+
     # Build the order record (shape matches sheets.save_order_to_sheet)
     order_record = {
         "order_id": order_id,
@@ -476,7 +476,7 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         "location_lng": loc["lng"],
         "maps_link": loc["maps_link"],
     }
- 
+
     # Save to Google Sheets via webhook
     try:
         from sheets import save_order_to_sheet
@@ -487,7 +487,7 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     except Exception as e:
         logger.error(f"Failed to save to Google Sheets: {e}")
         # Don't fail the order — admin will get notification anyway
- 
+
     # Notify admin
     if ADMIN_CHAT_ID:
         try:
@@ -507,7 +507,7 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
         except Exception as e:
             logger.error(f"Failed to notify admin: {e}")
- 
+
     # Confirm to customer
     confirmation = (
         f"🎉 *Sifarişiniz qəbul edildi!*\n\n"
@@ -523,12 +523,12 @@ async def receive_location(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         parse_mode="Markdown",
         reply_markup=ReplyKeyboardRemove(),
     )
- 
+
     # Clear session for next order
     context.user_data.clear()
     return ConversationHandler.END
- 
- 
+
+
 async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """User typed /cancel anywhere — exit conversation."""
     context.user_data.clear()
@@ -537,8 +537,8 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         reply_markup=ReplyKeyboardRemove(),
     )
     return ConversationHandler.END
- 
- 
+
+
 # ============================================================
 # HEALTH-CHECK SERVER (for Render free web service)
 # ============================================================
@@ -546,41 +546,41 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 # A web service must listen on a port. This tiny server does that —
 # it just replies "alive" to any visit. The bot keeps polling as normal.
 # This does NOT change any bot behavior; it's purely a "doorbell".
- 
+
 class HealthCheckHandler(BaseHTTPRequestHandler):
     """Replies 'alive' to any HTTP request so Render sees a web service."""
- 
+
     def do_GET(self):
         self.send_response(200)
         self.send_header("Content-type", "text/plain; charset=utf-8")
         self.end_headers()
         self.wfile.write("Bərəkətli bot alive 🌿".encode("utf-8"))
- 
+
     def log_message(self, format, *args):
         # Silence the default noisy request logging
         return
- 
- 
+
+
 def start_health_server():
     """Start the health-check server on the port Render provides."""
     port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
     logger.info(f"Health-check server listening on port {port}")
     server.serve_forever()
- 
- 
+
+
 # ============================================================
 # MAIN — wire it all up
 # ============================================================
- 
+
 def main() -> None:
     """Start the bot."""
     if not BOT_TOKEN or BOT_TOKEN == "PASTE_YOUR_TOKEN_HERE":
         print("❌ ERROR: Set your BOT_TOKEN in the .env file first!")
         return
- 
+
     application = Application.builder().token(BOT_TOKEN).build()
- 
+
     # Conversation handler defines the full flow
     conv_handler = ConversationHandler(
         entry_points=[
@@ -612,17 +612,24 @@ def main() -> None:
         fallbacks=[CommandHandler("cancel", cancel_command)],
         per_message=False,
     )
- 
+
     application.add_handler(conv_handler)
- 
+
     # Start health-check server in background (for Render free web service)
     health_thread = threading.Thread(target=start_health_server, daemon=True)
     health_thread.start()
- 
+
     print("🤖 Bərəkətli bot işə düşdü. Dayandırmaq üçün Ctrl+C basın.")
     application.run_polling(allowed_updates=Update.ALL_TYPES)
- 
- 
+
+
 if __name__ == "__main__":
+    # Ensure an event loop exists in the main thread.
+    # Newer Python versions (3.12+) no longer auto-create one, which can
+    # cause "no current event loop" errors with some library versions.
+    import asyncio
+    try:
+        asyncio.get_event_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
     main()
- 
